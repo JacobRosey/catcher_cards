@@ -192,7 +192,7 @@ def create_bar_plot(ax):
     ax.set_ylim(0, 10)
     ax.axis('off')
 
-def show_logo(ax):
+def show_logo(ax): #figure out how to round the corners of the image
     img = mpimg.imread('kickdirt.jpg')  
     ax.imshow(img, aspect='auto', extent=[-0.125, 0.125, 0.75, 1.0], zorder=10)  # Adjust `extent` for placement
     ax.axis('off')
@@ -308,12 +308,14 @@ def get_all_csaa(all_catcher_throwing):
 
     current_player_id = current_csaa = current_teamwork = current_pitching = 0
 
+    # convert string to dict
     all_catcher_throwing['data'] = all_catcher_throwing['data'].apply(ast.literal_eval)
 
     for index, catcher in all_catcher_throwing.iterrows():
         data = catcher.get('data')
         this_player_id = data.get('catcher_id')
         if current_player_id != this_player_id:
+            print(f'last player id: {current_player_id} next player id: {this_player_id}')
             all_csaa.append([current_player_id, current_csaa, current_csaa - current_teamwork, current_csaa - current_teamwork - current_pitching  ])
             current_player_id = this_player_id
             current_csaa = current_teamwork = current_pitching = 0
@@ -321,7 +323,58 @@ def get_all_csaa(all_catcher_throwing):
         current_csaa += data.get('cs_aa')
         current_teamwork += data.get('teamwork_over_xcs')
         current_pitching += data.get('pitcher_cs_aa') if type(data.get('pitcher_cs_aa')) == float else 0
-    return pd.DataFrame(all_csaa, columns=['id', 'csaa', 'csaa-team', 'pure_csaa'])
+    all_csaa.append([current_player_id, current_csaa, current_csaa - current_teamwork, current_csaa - current_teamwork - current_pitching  ])
+    return pd.DataFrame(all_csaa, columns=['player_id', 'csaa', 'csaa-team', 'pure_csaa'])    
+
+def create_csaa_scatter_plot(all_csaa):
+    # Calculate the difference between csaa and pure_csaa for the x-axis
+    all_csaa['csaa_difference'] = round(all_csaa['csaa'] - all_csaa['pure_csaa'])
+    
+    # Filter out players whose CSAA is too close to the origin (near 0), except for Austin Wells
+    all_csaa_filtered = all_csaa[
+    ~((all_csaa['csaa'].abs() <= 4) | (all_csaa['csaa_difference'].abs() < 2) | 
+      (all_csaa['last_name'] == "Knizner") | (all_csaa['last_name'] == "Ruiz"))
+]
+
+    # Specific additions/removals by request
+    aw_row = all_csaa[(all_csaa['first_name'] == 'Austin') & (all_csaa['last_name'] == 'Wells')]
+    wc_row = all_csaa[(all_csaa['first_name'] == 'William') & (all_csaa['last_name'] == 'Contreras')]
+    yd_row = all_csaa[(all_csaa['first_name'] == 'Yainer') & (all_csaa['last_name'] == 'Diaz')]
+    fa_row = all_csaa[(all_csaa['first_name'] == 'Francisco') & (all_csaa['last_name'] == 'Alvarez')]
+    all_csaa_filtered = pd.concat([all_csaa_filtered, aw_row, wc_row, yd_row, fa_row])
+
+
+    pd.set_option('display.max_rows', None)  # No limit on the number of rows
+    pd.set_option('display.max_columns', None)  # No limit on the number of columns
+    pd.set_option('display.width', None)  # Disable line wrapping for wide dataframes 
+    pd.set_option('display.max_colwidth', None)  # No truncation of column content
+    
+    # Create a new figure
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Scatter plot: x is the difference between CSAA and Pure CSAA, y is the CSAA value
+    scatter = ax.scatter(all_csaa_filtered['csaa_difference'], all_csaa_filtered['csaa'], color='blue', alpha=0.5, edgecolors='w', s=100)
+    
+    # Add labels and title
+    ax.set_xlabel('Teamwork Impact', fontsize=12)
+    ax.set_ylabel('CSAA', fontsize=12)
+    ax.set_title("Teamwork's Impact on CSAA", fontsize=14)
+    
+    # Add a grid for better visualization
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+
+    ax.set_xlim(-8, 8)
+    ax.set_ylim(-12, 14)
+    
+    # Loop through each player in the filtered dataframe to add their name to the plot
+    for i, row in all_csaa_filtered.iterrows():
+        # Add player's name above their point (adjust y-offset to avoid overlap)
+        ax.text(row['csaa_difference'], row['csaa'] + 0.3, f"{row['first_name']} {row['last_name']}", 
+                fontsize=8, ha='center', color='black')
+
+    # Show the plot
+    plt.show()
+
 
 def main():
 
@@ -364,6 +417,7 @@ def main():
     print(f"CSAA: {csaa[0]} CSAA no teamwork: {csaa[1]} CSAA no pitcher: {csaa[2]}")
 
     all_csaa = get_all_csaa(all_catcher_throwing)
+        
 
     # Create mappings for each stat
     csaa_percentile_mappings = {col: get_percentile_mapping(all_csaa[col]) for col in all_csaa}    
@@ -371,13 +425,9 @@ def main():
     framing_percentile_mappings = {col: get_percentile_mapping(framing[col]) for col in framing.columns}
 
     player_data = statsapi.player_stat_data(player_id, group="[fielding]", type="yearByYear")
-    stats23 = get_catcher_stats(player_data, '2023')
-    stats24 = get_catcher_stats(player_data, '2024')
 
-    if stats23 is None:
-        stats23 = pd.Series()
-    if stats24 is None:
-        stats24 = pd.Series()
+    stats23 = get_catcher_stats(player_data, '2023') or None
+    stats24 = get_catcher_stats(player_data, '2024') or None
 
     current_team = get_current_team(player_data)
 
@@ -406,6 +456,8 @@ def main():
     fig.subplots_adjust(hspace=0.25)  # Increase vertical spacing between rows
 
     gs = GridSpec(2, 3, figure=fig, width_ratios=[1, 1, 1], height_ratios=[1, 1])  # 2 rows, 3 columns
+
+    splot = plt.figure(figsize=(screen_width / 100, screen_height / 100))
 
     # Upper Left: Placeholder Bar Graph
     ax1 = fig.add_subplot(gs[0, 0])
@@ -439,14 +491,23 @@ def main():
     fig.text(0.5125, 0.08, "Shadow Zone Strike Rate", ha='center', va='center', fontsize=12, fontweight="bold") # strike zone 'title'
     fig.text(0.5125, 0.05, "& Framing Runs", ha='center', va='center', fontsize=12, fontweight="bold") # strike zone 'title'
     fig.text(0.5125, 0.95, f"{player_name}", ha='center', va='center', fontsize=12, fontweight="bold") # player name
-    fig.text(0.5125, 0.9, f"{current_team}", ha='center', va='center', fontsize=12) # player team
-    fig.text(.51, .5, f"{measurables}", ha='center', va='center', fontsize=10) #age height weight
+    fig.text(0.5125, 0.9, f"{current_team}", ha='center', va='center', fontsize=12) 
+    fig.text(.51, .5, f"{measurables}", ha='center', va='center', fontsize=10) 
 
     # Adjust layout
     plt.tight_layout() 
 
     # Show the plot
-    plt.show()
+    #plt.show()
+
+    all_csaa = all_csaa.merge(framing[['player_id', 'first_name', 'last_name']], on='player_id', how='left')
+    
+    create_csaa_scatter_plot(all_csaa)
+
+    #will_smith_id = 0
+    #will_smith_data = get_catcher_throwing(will_smith_id, '2024')
+    #print(will_smith_data)
+
 
 if __name__ == "__main__":
     main()
