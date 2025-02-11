@@ -330,7 +330,7 @@ def create_csaa_scatter_plot(all_csaa):
     # Calculate the difference between csaa and pure_csaa for the x-axis
     all_csaa['csaa_difference'] = round(all_csaa['csaa'] - all_csaa['pure_csaa'])
     
-    # Filter out players whose CSAA is too close to the origin (near 0), except for Austin Wells
+    # Filter out players whose CSAA is too close to the origin (near 0)
     all_csaa_filtered = all_csaa[
     ~((all_csaa['csaa'].abs() <= 4) | (all_csaa['csaa_difference'].abs() < 2) | 
       (all_csaa['last_name'] == "Knizner") | (all_csaa['last_name'] == "Ruiz"))
@@ -343,12 +343,6 @@ def create_csaa_scatter_plot(all_csaa):
     fa_row = all_csaa[(all_csaa['first_name'] == 'Francisco') & (all_csaa['last_name'] == 'Alvarez')]
     all_csaa_filtered = pd.concat([all_csaa_filtered, aw_row, wc_row, yd_row, fa_row])
 
-
-    pd.set_option('display.max_rows', None)  # No limit on the number of rows
-    pd.set_option('display.max_columns', None)  # No limit on the number of columns
-    pd.set_option('display.width', None)  # Disable line wrapping for wide dataframes 
-    pd.set_option('display.max_colwidth', None)  # No truncation of column content
-    
     # Create a new figure
     fig, ax = plt.subplots(figsize=(8, 6))
     
@@ -372,8 +366,7 @@ def create_csaa_scatter_plot(all_csaa):
         ax.text(row['csaa_difference'], row['csaa'] + 0.3, f"{row['first_name']} {row['last_name']}", 
                 fontsize=8, ha='center', color='black')
 
-    # Show the plot
-    plt.show()
+    return plt
 
 
 def main():
@@ -497,16 +490,19 @@ def main():
     # Adjust layout
     plt.tight_layout() 
 
-    # Show the plot
-    #plt.show()
-
     all_csaa = all_csaa.merge(framing[['player_id', 'first_name', 'last_name']], on='player_id', how='left')
     
-    create_csaa_scatter_plot(all_csaa)
 
-    #will_smith_id = 0
-    #will_smith_data = get_catcher_throwing(will_smith_id, '2024')
-    #print(will_smith_data)
+    # Show the main graphic
+    plt.show()
+
+    # Get the scatterplot
+    csaa_plot = create_csaa_scatter_plot(all_csaa)
+
+    # Show the scatterplot
+    csaa_plot.show()
+
+
 
 
 if __name__ == "__main__":
