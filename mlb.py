@@ -1,11 +1,9 @@
-import pybaseball
 from pybaseball import statcast_catcher_framing, statcast_catcher_poptime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.gridspec import GridSpec
-import matplotlib.image as mpimg
 import requests
 from PIL import Image
 import requests
@@ -16,11 +14,10 @@ import os
 import ast
 
 # Function to get player index from framing data
-def get_player_index(user_in, unfiltered_framing):
+def get_framing_player_index(user_in, unfiltered_framing):
     for index, row in unfiltered_framing.iterrows():
         if index == 0:  # Skip league average row
             continue
-        print(f"index: {index} player: {row.first_name} {row.last_name}")
         if user_in.lower() == (row.first_name + ' ' + row.last_name).lower():
             return index
     return None
@@ -39,8 +36,9 @@ def get_percentile_mapping(column):
     filtered_cols = ['id', 'year', 'catcher', 'last_name', 'first_name', 'player_id', 'team_id', 'age']
     if column.name in filtered_cols:
         return None # we don't give no fucks about your age percentile
-    percentiles = np.arange(0, 101, 5)  # 0th to 100th percentiles, steps of 5
+    percentiles = np.arange(0, 101, 1)  # 0th to 100th percentiles, steps of 5
     values = np.percentile(column.dropna(), percentiles)
+    
     return dict(zip(percentiles, values))
 
 # Function to find the percentile of a value
@@ -49,6 +47,55 @@ def find_percentile(value, mapping):
         if value <= threshold:
             return percentile
     return 100
+
+def add_suffix(percentile):
+    percentileAsStr = str(percentile)
+    last_digit = int(percentileAsStr[-1])  # Convert last digit to int
+
+    if 11 <= percentile <= 13:  # Handle special cases (11th, 12th, 13th)
+        suffix = "th"
+    elif last_digit == 1:
+        suffix = "st"
+    elif last_digit == 2:
+        suffix = "nd"
+    elif last_digit == 3:
+        suffix = "rd"
+    else:
+        suffix = "th"
+
+    return f"{percentile}{suffix}"
+
+# Function to get the grid color for a percentile
+def get_percentile_info(data, key, mapping):
+    percentile = find_percentile(data[key], mapping[key])
+
+    if percentile < 40:
+        color = "crimson"
+    elif percentile < 55:
+        color = "yellow"
+    elif percentile <= 70:
+        color = "lightgreen"
+    else:
+        color = "green"
+
+    return {'color': color, 'value': percentile}  # Keep percentile as int
+
+# Used to calculate percentiles where lower numbers are better
+def invert_percentile(item):
+    item['value'] = 100 - item['value']  # Keep it an integer
+    
+    # Color mapping using a dictionary
+    color_mapping = {
+        'crimson': 'green',
+        'green': 'crimson',
+        'lightgreen': 'yellow',
+        'yellow': 'lightgreen'
+    }
+    
+    # Get the new color
+    item['color'] = color_mapping.get(item['color'], item['color'])
+    
+    return item
 
 def get_player_headshot(player_id: str):
     # Construct the URL for the player's headshot image
@@ -64,6 +111,25 @@ def get_player_headshot(player_id: str):
 
     return img
 
+def get_catcher_blocking(player_id, year):
+    filename = f"{player_id}_{year}_blocking.csv"
+    if os.path.exists(filename):
+        print(f"File {filename} exists. Returning the data from the file.")
+        return pd.read_csv(filename)
+    
+    url = f'https://baseballsavant.mlb.com/leaderboard/services/catcher-blocking/{player_id}?game_type=Regular&n=q&season_end={year}&season_start={year}&split=no&team=&type=Cat&with_team_only=1'
+ 
+    # Send a GET request to the leaderboard page
+    response = requests.get(url)
+    
+    if response.status_code == 200:
+        df = pd.DataFrame(response.json())
+        df.to_csv(filename, index = False, header = True)
+        return df
+    else:
+        print(f"Error: {response.status_code}")
+        return None
+     
 def get_catcher_throwing(player_id, year):
     url = f'https://baseballsavant.mlb.com/leaderboard/services/catcher-throwing/{player_id}?game_type=Regular&n=q&season_end={year}&season_start={year}&split=no&team=&type=Cat&with_team_only=1'
 
@@ -78,20 +144,129 @@ def get_catcher_throwing(player_id, year):
         print(f"Error: {response.status_code}")
         return None
 
-def create_strike_zone_plot(ax, catcher_framing, get_grid_color):
+def calculate_blocking_metrics(df):
+    # Check if the 'data' column exists
+    if 'data' not in df.columns:
+        raise ValueError("Data column not found in the DataFrame.")
+    
+    # Apply ast.literal_eval only if 'data' column is stringified (i.e., read from CSV)
+    if isinstance(df['data'].iloc[0], str):
+        # Convert stringified dictionaries into actual dictionaries
+        df['data'] = df['data'].apply(ast.literal_eval)
+    
+    # Normalize the 'data' column (expand it into multiple columns)
+    df_expanded = pd.json_normalize(df['data'])
+
+    # Merge the expanded columns back into the original DataFrame
+    df = df.join(df_expanded)
+
+    # Check if necessary columns exist
+    if not {'x_runner_pbwp', 'is_runner_pbwp'}.issubset(df.columns):
+        print("Columns in DataFrame:", df.columns)
+        raise ValueError("DataFrame must contain 'x_runner_pbwp' and 'is_runner_pbwp' columns.")
+    
+    # Apply categorization for difficulty
+    def categorize_difficulty(x_pbwp):
+        if x_pbwp < 0.05:
+            return 'Easy'
+        elif 0.05 <= x_pbwp < 0.15:
+            return 'Medium'
+        else:
+            return 'Hard'
+
+    df['difficulty'] = df['x_runner_pbwp'].apply(categorize_difficulty)
+
+    # Group by difficulty and calculate metrics
+    results = []
+    for difficulty, group in df.groupby('difficulty'):
+        total_opportunities = len(group)
+        total_passed_balls = group['is_runner_pbwp'].sum()
+        expected_passed_balls = group['x_runner_pbwp'].sum()
+
+        block_percent = 1 - (total_passed_balls / total_opportunities) if total_opportunities > 0 else 0
+        blocks_above_average = (total_opportunities - total_passed_balls) - (total_opportunities - expected_passed_balls)
+
+        results.append({
+            'Difficulty': difficulty,
+            'Total Opportunities': total_opportunities,
+            'Total Passed Balls': total_passed_balls,
+            'Expected Passed Balls': expected_passed_balls,
+            'Block %': block_percent,
+            'Blocks Above Average': blocks_above_average
+        })
+
+    return pd.DataFrame(results)
+
+def create_metrics_table(ax, df):
+    # Rename columns
+    df = df.rename(columns={
+        'Difficulty': 'Difficulty',
+        'Total Passed Balls': 'PBWP',
+        'Expected Passed Balls': 'xPBWP',
+        'Block %': '% Blocked',
+        'Blocks Above Average': 'BAA'
+    })
+
+    # Remove the 'Total Opportunities' column
+    df = df.drop(columns=['Total Opportunities'])
+
+    # Need to strip .0 from this int somehow !!!!!!!!!!!!
+    df['PBWP'] = df['PBWP'].astype(int).astype(str)
+
+    # Round to 2 decimal places
+    df[['xPBWP', 'BAA']] = df[['xPBWP', 'BAA']].round(2)
+
+    df['% Blocked'] = (df['% Blocked'].round(3) * 100).round(2)
+
+    # Define the custom order for 'Difficulty' and sort accordingly
+    difficulty_order = ['Easy', 'Medium', 'Hard']
+    df['Difficulty'] = pd.Categorical(df['Difficulty'], categories=difficulty_order, ordered=True)
+    
+    # Sort by difficulty
+    df = df.sort_values(by='Difficulty')
+
+    # Pivot the dataframe to have difficulty levels as columns
+    df_pivot = df.set_index('Difficulty').transpose()
+
+    # Create the table
+    table = ax.table(cellText=df_pivot.values, colLabels=df_pivot.columns, rowLabels=df_pivot.index, loc='center', cellLoc='center', bbox=[0.25, 0.1, 0.75, 0.8])
+
+    # Set table styling
+    for key, cell in table.get_celld().items():
+        cell.set_height(0.18)  # Adjust cell height
+        cell.set_width(0.25)   # Adjust cell width
+
+    # Highlight the header row and column
+    for (row, col), cell in table.get_celld().items():
+        if row == 0 or col == -1:  # Header row and first column
+            cell.set_text_props(weight='bold', color='black', ha='center')
+            cell.set_facecolor('#e0e0e0') 
+        else: 
+            cell.set_text_props(color='black', ha='center')
+            cell.set_facecolor('#ffffff') 
+
+
+    total_baa = (df['xPBWP'].astype(float) - df['PBWP'].astype(int)).sum()
+    ax.text(0.49, 0, f"Total Blocks Above Average: {total_baa:.1f}", ha='center', va='center', fontsize=9, color='black', transform=ax.transAxes, fontweight='bold')
+    
+    # Remove axes for better visibility
+    ax.axis('off')
+    ax.set_title("Blocks Above Average", fontweight='bold')
+
+def create_strike_zone_plot(ax, catcher_framing, framing_percentile_mappings):
     # Draw the strike zone grid
     ax.add_patch(patches.Rectangle((0, 0), 3, 3, edgecolor='black', facecolor='none'))
     ax.add_patch(patches.Rectangle((1, 1), 1, 1, edgecolor='black', facecolor='none'))
 
-    ax.add_patch(patches.Rectangle((0, 0), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_17')['color']))
-    ax.add_patch(patches.Rectangle((2, 0), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_19')['color']))
-    ax.add_patch(patches.Rectangle((0, 2), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_11')['color']))
-    ax.add_patch(patches.Rectangle((2, 2), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_13')['color']))
+    ax.add_patch(patches.Rectangle((0, 0), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_17', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((2, 0), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_19', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((0, 2), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_11', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((2, 2), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_13', framing_percentile_mappings)['color']))
 
-    ax.add_patch(patches.Rectangle((1, 0), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_18')['color']))
-    ax.add_patch(patches.Rectangle((1, 2), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_12')['color']))
-    ax.add_patch(patches.Rectangle((0, 1), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_14')['color']))
-    ax.add_patch(patches.Rectangle((2, 1), 1, 1, edgecolor='black', facecolor=get_grid_color('strike_rate_16')['color']))
+    ax.add_patch(patches.Rectangle((1, 0), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_18', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((1, 2), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_12', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((0, 1), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_14', framing_percentile_mappings)['color']))
+    ax.add_patch(patches.Rectangle((2, 1), 1, 1, edgecolor='black', facecolor=get_percentile_info(catcher_framing, 'strike_rate_16', framing_percentile_mappings)['color']))
 
     # Set axis limits and labels
     ax.set_xlim(0, 3)
@@ -101,146 +276,127 @@ def create_strike_zone_plot(ax, catcher_framing, get_grid_color):
 
     # Add labels
     ax.text(0.5, 2.5, f"{catcher_framing.strike_rate_11}%", ha='center', va='center', fontsize=10)
-    ax.text(0.5, 2.2,  f"{get_grid_color('strike_rate_11')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(0.5, 2.2,  f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_11', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(1.5, 2.5, f"{catcher_framing.strike_rate_12}%", ha='center', va='center', fontsize=10)
-    ax.text(1.5, 2.2, f"{get_grid_color('strike_rate_12')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(1.5, 2.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_12', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(2.5, 2.5, f"{catcher_framing.strike_rate_13}%", ha='center', va='center', fontsize=10)
-    ax.text(2.5, 2.2, f"{get_grid_color('strike_rate_13')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(2.5, 2.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_13', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(0.5, 1.5, f"{catcher_framing.strike_rate_14}%", ha='center', va='center', fontsize=10)
-    ax.text(0.5, 1.2, f"{get_grid_color('strike_rate_14')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(0.5, 1.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_14', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(1.5, 1.5, f"FR: {catcher_framing.runs_extra_strikes}", ha='center', va='center', fontsize=10, fontweight='bold')
-    ax.text(1.5, 1.2, f"{get_grid_color('runs_extra_strikes')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(1.5, 1.2, f"{add_suffix(get_percentile_info(catcher_framing, 'runs_extra_strikes', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(2.5, 1.5, f"{catcher_framing.strike_rate_16}%", ha='center', va='center', fontsize=10)
-    ax.text(2.5, 1.2, f"{get_grid_color('strike_rate_16')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(2.5, 1.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_16', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(0.5, 0.5, f"{catcher_framing.strike_rate_17}%", ha='center', va='center', fontsize=10)
-    ax.text(0.5, 0.2, f"{get_grid_color('strike_rate_17')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(0.5, 0.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_17', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(1.5, 0.5, f"{catcher_framing.strike_rate_18}%", ha='center', va='center', fontsize=10)
-    ax.text(1.5, 0.2, f"{get_grid_color('strike_rate_18')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(1.5, 0.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_18', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
     ax.text(2.5, 0.5, f"{catcher_framing.strike_rate_19}%", ha='center', va='center', fontsize=10)
-    ax.text(2.5, 0.2, f"{get_grid_color('strike_rate_19')['value']}th", ha='center', va='center', fontsize=8)
+    ax.text(2.5, 0.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_19', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
+
 
 def create_csaa_plot(ax, csaa, csaa_percentile_mappings):
-    #categories = ['CSAA', 'CSAA-teamwork', 'Pure CSAA']
-    #values = csaa[0], csaa[1], csaa[2]
+
+    csaa = pd.DataFrame([csaa], columns=['csaa', 'csaa_no_teamwork', 'pure_csaa'])
+
     categories = ['Pure CSAA', 'CSAA']
-    values = csaa[2], csaa[0]
-    
-    # Calculate the percentiles for each category
-    percentiles = [
-        find_percentile(csaa[2], csaa_percentile_mappings['csaa']),
-        #find_percentile(csaa[1], csaa_percentile_mappings['csaa-team']),
-        find_percentile(csaa[0], csaa_percentile_mappings['pure_csaa'])
+    values = [csaa.iloc[0]['pure_csaa'], csaa.iloc[0]['csaa']]
+
+    percentile_info = [
+        get_percentile_info(csaa.iloc[0], 'pure_csaa', csaa_percentile_mappings),
+        get_percentile_info(csaa.iloc[0], 'csaa', csaa_percentile_mappings)
     ]
     
-    # Define the color based on the percentile
-    def get_color(percentile):
-        if percentile < 40:
-            return 'crimson'  # Red
-        elif percentile < 55:
-            return 'yellow'  # Yellow
-        elif percentile < 70:
-            return 'lightgreen'  # Light Green
-        else:
-            return 'green'  # Dark Green
-    
-    # Assign a color for each bar based on the percentile
-    colors = [get_color(p) for p in percentiles]
-    
+    # Extract the percentiles and colors from get_percentile_info
+    percentiles = [info['value'] for info in percentile_info]
+    colors = [info['color'] for info in percentile_info]
+
     # Create horizontal bar chart with dynamic colors
     bars = ax.barh(categories, values, color=colors, height=0.5)  # Set height to create space between bars
     
-    # Set axis limits and remove axis
-    ax.set_xlim(-10, 10)  # Center the axis at 0 and allow both negative and positive values
-    ax.axis('off')
+    # Set axis limits to reflect the full range for negative and positive values
+    ax.set_xlim(-12, 14)  # Dynamically adjust the x-axis range
     
-   # Add text labels to each bar
-    for bar, value, percentile in zip(bars, values, percentiles):
-        # For negative values, place the value label to the left, and for positive values to the right
-        if value < 0:
-            # Ensure the label does not go too far left (beyond -10)
-            label_x = bar.get_width() - 0.4
-            if bar.get_width() < -9.6:  # Check if the bar is close to the left edge (-10)
-                label_x = -10.4  # Place label outside the bar
-            ax.text(label_x, bar.get_y() + bar.get_height() / 2,  # Position text to the left for negative
-                    f'{value:.2f}', va='center', fontsize=10, ha='right')
-            # Add the percentile near the origin of each bar
-            ax.text(4.5, bar.get_y() + bar.get_height() / 2,  # Position percentile at the center (origin)
-                f'{percentile}th percentile', va='center', ha='center', fontsize=10)
-        else:
-            # Ensure the label does not go too far right (beyond 10)
-            label_x = bar.get_width() + 0.4
-            if bar.get_width() > 9.6:  # Check if the bar is close to the right edge (10)
-                label_x = 10.4  # Place label outside the bar
-            ax.text(label_x, bar.get_y() + bar.get_height() / 2,  # Position text to the right for positive
-                    f'{value:.2f}', va='center', fontsize=10, ha='left')
-            # Add the percentile near the origin of each bar
-            ax.text(-4.5, bar.get_y() + bar.get_height() / 2,  # Position percentile at the center (origin)
-                f'{percentile}th percentile', va='center', ha='center', fontsize=10)
+    # Add vertical grid lines
+    ax.grid(True, axis='x', linestyle='--', alpha=0.5)
 
-    # Move category labels above the bars, closer to the origin
-    for index, category in enumerate(categories):
-        
-        # Position category label above the bar, centered over each bar
-        ax.text(0, bars[index].get_y() + bars[index].get_height() / 2 + 0.4,  # Slightly above the center of the bar
-                category, va='center', ha='center', fontsize=10, fontweight='bold')
+    # Add "Value" label to x-axis
+    ax.set_xlabel('Value', fontsize=12)
+    ax.set_yticklabels(categories, fontweight='bold')
+    
+    # Add the percentile inside the bars
+    for index, bar in enumerate(bars):
+        # Place percentile text inside the bar, centered in the bar
+        ax.text(0, bar.get_y() + bar.get_height() / 2, 
+                f'{add_suffix(percentiles[index])} percentile', ha='center', va='center', color='black', fontsize=9)
 
+    #ax.set_title("CSAA & Pure CSAA", fontweight='bold')
 
-def create_bar_plot(ax):
-    categories = ['a', 'b', 'c', 'd']
-    values = [1, 2, 3, 4]
-    ax.bar(categories, values, color='crimson')
-    ax.set_ylim(0, 10)
-    ax.axis('off')
+def create_pop_plot(ax, stats, pop_percentile_mappings):
+    
+    # Get percentile info for each stat - invert those where smaller numbers are better
+    exchange = invert_percentile(get_percentile_info(stats, 'exchange_2b_3b_sba', pop_percentile_mappings))
+    pop2b = invert_percentile(get_percentile_info(stats, 'pop_2b_sba', pop_percentile_mappings))
+    pop3b = invert_percentile(get_percentile_info(stats, 'pop_3b_sba', pop_percentile_mappings))
+    maxeff_velo = get_percentile_info(stats, 'maxeff_arm_2b_3b_sba', pop_percentile_mappings)
 
-def show_logo(ax): #figure out how to round the corners of the image
-    img = mpimg.imread('kickdirt.jpg')  
-    ax.imshow(img, aspect='auto', extent=[-0.125, 0.125, 0.75, 1.0], zorder=10)  # Adjust `extent` for placement
-    ax.axis('off')
+    # Prepare categories and values for the bar chart
+    categories = ['Exchange', 'Pop 2B', 'Pop 3B', 'Max Eff Velo']
+    percentiles = [int(exchange['value']), int(pop2b['value']), int(pop3b['value']), int(maxeff_velo['value'])]
+    values = [float(stats['exchange_2b_3b_sba']), float(stats['pop_2b_sba']), float(stats['pop_3b_sba']), float(stats['maxeff_arm_2b_3b_sba'])]
+    colors = [exchange['color'], pop2b['color'], pop3b['color'], maxeff_velo['color']]
+    
+    # Create the vertical bar chart
+    ax.bar(categories, percentiles, color=colors)
+    ax.set_ylim(0, 100)  # Percentiles are between 0 and 100
+    ax.set_ylabel('Percentile')
+    
+    # Add values on the bars
+    for i, (value, percentile) in enumerate(zip(values, percentiles)):
+        offset = 0 if percentile <= 10 else -10
+        ax.text(i, percentile + offset, f'{value:.2f}', va='bottom', fontsize=10, ha='center')
+    
+    # Remove axis and set labels
+    ax.set_title('Pop Time & Exchange', fontweight='bold')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)  
 
-# replace args with player_info object with image, name, age, height, weight
 def create_headshot_info_plot(ax, player_name, img):
-
     ax.imshow(img, aspect='auto', extent=[0.2, 0.3, 0.4, 0.1])  # Adjust extent to position the image
     ax.text(0.5, 1.0, f"{player_name}", ha='center', va='center', fontsize=12)
-    #ax.text(0.25, 0.2, "Age", ha='center', va='center', fontsize=10)
-    #ax.text(0.5, 0.2, "height", ha='center', va='center', fontsize=10)
-    #ax.text(0.75, 0.2, "weight", ha='center', va='center', fontsize=10)
     ax.axis('off')  # Hide axes
 
 def create_key_stats_plot(ax, stats23, stats24):
-        
     cell_text = [
         ["", "2023", "2024"],
         ["Innings", stats23.get("innings", "No data"), stats24.get("innings", "No data")],
         ["Fielding %", stats23.get("fielding", "No data"), stats24.get("fielding", "No data")],
         ["E", stats23.get("errors", "No data"), stats24.get("errors", "No data")],
-        #["WP", stats23.get("wildPitches", "No data"), stats24.get("wildPitches", "No data")],
+        #["DP", stats23.get("doublePlays", "No data"), stats24.get("doublePlays", "No data")],
         ["PB", stats23.get("passedBall", "No data"), stats24.get("passedBall", "No data")],
-        ["DP", stats23.get("doublePlays", "No data"), stats24.get("doublePlays", "No data")],
+        ["WP", stats23.get("wildPitches", "No data"), stats24.get("wildPitches", "No data")],
         #["CERA", stats23.get("catcherERA", "No data"), stats24.get("catcherERA", "No data")]
     ]
 
-    # Continue with the code for displaying the table
     table = ax.table(cellText=cell_text, loc='center', cellLoc='center')
 
     for key, cell in table.get_celld().items():
-        cell.set_height(.18)  # Adjust cell height
-        cell.set_width(.32)   # Adjust cell width
+        cell.set_height(.18)  
+        cell.set_width(.32)   
 
     # Highlight the header row
     for (row, col), cell in table.get_celld().items():
+        if row == 0 and col == 0:
+            cell.set_linewidth(0)
+            cell.set_facecolor('none')
+            continue
         if row == 0 or col == 0:  # Header row
             cell.set_text_props(weight='bold', color='black')
-            cell.set_facecolor('#f0f0f0')  # Light gray background for header
+            cell.set_facecolor('#e0e0e0')  # Light gray background for header
            
-    # Add a placeholder for the image in the top-left cell
-    ax.text(0.15, 0.85, "", ha='center', va='center', fontsize=8, color='black', transform=ax.transAxes)
-
-    # Remove axes for better visibility
     ax.axis('off')
 
 def get_catcher_stats(player_data, year):
-    # Find the stats for 2024 where the position is "Catcher"
+    # Find the stats for year where the position is "Catcher"
     for stat_entry in player_data['stats']:
         if stat_entry['season'] == year and stat_entry['stats']['position']['name'] == 'Catcher':
             return stat_entry['stats']
@@ -285,7 +441,7 @@ def get_all_catcher_throwing(ids, filename='catcher_throwing_data.csv'):
     # Save the data to a CSV file
     all_catcher_throwing.to_csv(filename, index=False, header=True)
     
-    return all_catcher_throwing  # Return the flattened DataFrame
+    return all_catcher_throwing 
 
 
 def get_csaa(catcher_throwing):
@@ -294,7 +450,7 @@ def get_csaa(catcher_throwing):
     pitching = 0
 
     for _, row in catcher_throwing.iterrows():
-        data = row.get('data', [])  # Assuming 'data' is a column with nested data
+        data = row.get('data', [])  
         csaa += data.get('cs_aa', 0)
         teamwork += data.get('teamwork_over_xcs', 0)
         if type(data.get('pitcher_cs_aa')) == float:
@@ -315,7 +471,6 @@ def get_all_csaa(all_catcher_throwing):
         data = catcher.get('data')
         this_player_id = data.get('catcher_id')
         if current_player_id != this_player_id:
-            print(f'last player id: {current_player_id} next player id: {this_player_id}')
             all_csaa.append([current_player_id, current_csaa, current_csaa - current_teamwork, current_csaa - current_teamwork - current_pitching  ])
             current_player_id = this_player_id
             current_csaa = current_teamwork = current_pitching = 0
@@ -336,7 +491,7 @@ def create_csaa_scatter_plot(all_csaa):
       (all_csaa['last_name'] == "Knizner") | (all_csaa['last_name'] == "Ruiz"))
 ]
 
-    # Specific additions/removals by request
+    # Specific additions by request
     aw_row = all_csaa[(all_csaa['first_name'] == 'Austin') & (all_csaa['last_name'] == 'Wells')]
     wc_row = all_csaa[(all_csaa['first_name'] == 'William') & (all_csaa['last_name'] == 'Contreras')]
     yd_row = all_csaa[(all_csaa['first_name'] == 'Yainer') & (all_csaa['last_name'] == 'Diaz')]
@@ -378,7 +533,7 @@ def main():
     user_in = input("Enter player: ")
 
     # Get player index for framing
-    framing_player_index = get_player_index(user_in, framing)
+    framing_player_index = get_framing_player_index(user_in, framing)
     if framing_player_index is None:
         print("Could not find player in framing data! Please try again.")
         return
@@ -390,14 +545,9 @@ def main():
         print("Could not find player in poptime data! Please try again.")
         return
 
-    # Get catcher framing data
-    catcher_framing = framing.iloc[framing_player_index]
-    catcher_pop = pop.iloc[pop_player_index]
 
-    player_id = str(int(framing.iloc[framing_player_index].player_id)) #why tf are player id's float values?
+    player_id = str(int(framing.iloc[framing_player_index].player_id))
     img = get_player_headshot(player_id)
-
-    #x = pybaseball.fielding_stats(2024)
 
     all_catcher_ids = collect_player_ids(framing)
 
@@ -407,16 +557,13 @@ def main():
 
     csaa = get_csaa(catcher_throwing)
 
-    print(f"CSAA: {csaa[0]} CSAA no teamwork: {csaa[1]} CSAA no pitcher: {csaa[2]}")
-
     all_csaa = get_all_csaa(all_catcher_throwing)
-        
 
     # Create mappings for each stat
     csaa_percentile_mappings = {col: get_percentile_mapping(all_csaa[col]) for col in all_csaa}    
     pop_percentile_mappings = {col: get_percentile_mapping(pop[col]) for col in pop.columns}
     framing_percentile_mappings = {col: get_percentile_mapping(framing[col]) for col in framing.columns}
-
+  
     player_data = statsapi.player_stat_data(player_id, group="[fielding]", type="yearByYear")
 
     stats23 = get_catcher_stats(player_data, '2023') or None
@@ -424,18 +571,7 @@ def main():
 
     current_team = get_current_team(player_data)
 
-    # Function to get the grid color for a specific strike rate
-    def get_grid_color(key):
-        percentile = find_percentile(catcher_framing[key], framing_percentile_mappings[key])
-        
-        if percentile < 40:
-            return {'color': 'crimson', 'value': f'{percentile}'}  # Correct string formatting
-        if percentile < 55:
-            return {'color': 'yellow', 'value': f'{percentile}'}  # Correct string formatting
-        if percentile <= 70:
-            return {'color': 'lightgreen', 'value': f'{percentile}'}  # Correct string formatting
-        
-        return {'color': 'green', 'value': f'{percentile}'}  # Corrected return with dictionary
+    catcher_blocking = calculate_blocking_metrics(get_catcher_blocking(str(player_id), '2024'))
 
     # Create the figure with a custom layout
     root = tk.Tk()
@@ -445,32 +581,30 @@ def main():
     screen_height = root.winfo_screenheight()
 
     # Create the figure and plot
-    fig = plt.figure(figsize=(screen_width / 100, screen_height / 100))  # Screen size in inches (100 dpi)
-    fig.subplots_adjust(hspace=0.25)  # Increase vertical spacing between rows
+    fig = plt.figure(figsize=(screen_width / 100, screen_height / 100), facecolor="#F0F0F0")  # Screen size in inches (100 dpi)
+    fig.subplots_adjust(hspace=.35)  # Increase vertical spacing between rows
 
     gs = GridSpec(2, 3, figure=fig, width_ratios=[1, 1, 1], height_ratios=[1, 1])  # 2 rows, 3 columns
 
-    splot = plt.figure(figsize=(screen_width / 100, screen_height / 100))
-
-    # Upper Left: Placeholder Bar Graph
+    # Upper Left: Pop time and exchange
     ax1 = fig.add_subplot(gs[0, 0])
-    create_bar_plot(ax1)
+    create_pop_plot(ax1, pop.iloc[pop_player_index], pop_percentile_mappings)
 
     # Upper Middle: Headshot and General Information
     ax2 = fig.add_subplot(gs[0, 1])
     create_headshot_info_plot(ax2, csaa, img)
 
-    # Upper Right: Logo
+    # Upper Right: blocking
     ax3 = fig.add_subplot(gs[0, 2])
-    show_logo(ax3)
+    create_metrics_table(ax3, catcher_blocking)
 
-    # Bottom Left: Placeholder Bar Graph
+    # Bottom Left: csaa
     ax4 = fig.add_subplot(gs[1, 0])
     create_csaa_plot(ax4, csaa, csaa_percentile_mappings)
 
     # Bottom Center: Strike Zone Plot 
     ax5 = fig.add_subplot(gs[1, 1])
-    create_strike_zone_plot(ax5, catcher_framing, get_grid_color)
+    create_strike_zone_plot(ax5, framing.iloc[framing_player_index], framing_percentile_mappings)
 
     #Bottom Right: Key stats
     ax6 = fig.add_subplot(gs[1, 2])
@@ -485,25 +619,20 @@ def main():
     fig.text(0.5125, 0.05, "& Framing Runs", ha='center', va='center', fontsize=12, fontweight="bold") # strike zone 'title'
     fig.text(0.5125, 0.95, f"{player_name}", ha='center', va='center', fontsize=12, fontweight="bold") # player name
     fig.text(0.5125, 0.9, f"{current_team}", ha='center', va='center', fontsize=12) 
-    fig.text(.51, .5, f"{measurables}", ha='center', va='center', fontsize=10) 
+    fig.text(.51, .52, f"{measurables}", ha='center', va='center', fontsize=10) 
+    fig.text(.51, .48, "@kickdirtbb on X.com", ha='center', va='center', fontsize=9) 
 
     # Adjust layout
     plt.tight_layout() 
-
-    all_csaa = all_csaa.merge(framing[['player_id', 'first_name', 'last_name']], on='player_id', how='left')
-    
 
     # Show the main graphic
     plt.show()
 
     # Get the scatterplot
-    csaa_plot = create_csaa_scatter_plot(all_csaa)
+    #csaa_plot = create_csaa_scatter_plot(all_csaa)
 
     # Show the scatterplot
-    csaa_plot.show()
-
-
-
+    #csaa_plot.show()
 
 if __name__ == "__main__":
     main()
