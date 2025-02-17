@@ -12,14 +12,24 @@ import tkinter as tk
 import statsapi
 import os
 import ast
+import unicodedata
 
-# Function to get player index from framing data
+# "Christian Vazquez" == "Christian Vázquez"
+def normalize_text(text):
+    return ''.join(
+        c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn'
+    )
+
+def are_equivalent(text1, text2):
+    return normalize_text(text1).lower() == normalize_text(text2).lower()
+
 def get_framing_player_index(user_in, unfiltered_framing):
     for index, row in unfiltered_framing.iterrows():
         if index == 0:  # Skip league average row
             continue
-        if user_in.lower() == (row.first_name + ' ' + row.last_name).lower():
+        if are_equivalent(user_in, row.first_name + ' ' + row.last_name):
             return index
+        print(row.first_name + " " + row.last_name)
     return None
 
 # Function to get player index from poptime data
@@ -112,7 +122,7 @@ def get_player_headshot(player_id: str):
     return img
 
 def get_catcher_blocking(player_id, year):
-    filename = f"{player_id}_{year}_blocking.csv"
+    filename = f"data/{player_id}_{year}_blocking.csv"
     if os.path.exists(filename):
         print(f"File {filename} exists. Returning the data from the file.")
         return pd.read_csv(filename)
@@ -201,9 +211,9 @@ def create_metrics_table(ax, df):
     # Rename columns
     df = df.rename(columns={
         'Difficulty': 'Difficulty',
+        'Block %': '% Blocked',
         'Total Passed Balls': 'PBWP',
         'Expected Passed Balls': 'xPBWP',
-        'Block %': '% Blocked',
         'Blocks Above Average': 'BAA'
     })
 
@@ -222,6 +232,8 @@ def create_metrics_table(ax, df):
     difficulty_order = ['Easy', 'Medium', 'Hard']
     df['Difficulty'] = pd.Categorical(df['Difficulty'], categories=difficulty_order, ordered=True)
     
+    df = df[['Difficulty', '% Blocked', 'PBWP', 'xPBWP', 'BAA']]
+
     # Sort by difficulty
     df = df.sort_values(by='Difficulty')
 
@@ -294,41 +306,35 @@ def create_strike_zone_plot(ax, catcher_framing, framing_percentile_mappings):
     ax.text(2.5, 0.5, f"{catcher_framing.strike_rate_19}%", ha='center', va='center', fontsize=10)
     ax.text(2.5, 0.2, f"{add_suffix(get_percentile_info(catcher_framing, 'strike_rate_19', framing_percentile_mappings)['value'])}", ha='center', va='center', fontsize=8)
 
-
 def create_csaa_plot(ax, csaa, csaa_percentile_mappings):
-
-    csaa = pd.DataFrame([csaa], columns=['csaa', 'csaa_no_teamwork', 'pure_csaa'])
-
-    categories = ['Pure CSAA', 'CSAA']
-    values = [csaa.iloc[0]['pure_csaa'], csaa.iloc[0]['csaa']]
-
-    percentile_info = [
-        get_percentile_info(csaa.iloc[0], 'pure_csaa', csaa_percentile_mappings),
-        get_percentile_info(csaa.iloc[0], 'csaa', csaa_percentile_mappings)
-    ]
+    csaa = pd.DataFrame([csaa], columns =['csaa', 'csaa_no_teamwork', 'pure_csaa'])  # Let pandas infer column names properly
     
-    # Extract the percentiles and colors from get_percentile_info
-    percentiles = [info['value'] for info in percentile_info]
-    colors = [info['color'] for info in percentile_info]
+    categories = ['CSAA', 'Pure CSAA']
+    
+    # Retrieve percentile info
+    csaa_info = get_percentile_info(csaa.iloc[0], 'csaa', csaa_percentile_mappings)
+    pure_csaa_info = get_percentile_info(csaa.iloc[0], 'pure_csaa', csaa_percentile_mappings)
+    
+    # Ensure CSAA is first, Pure CSAA second
+    percentiles = [csaa_info['value'], pure_csaa_info['value']]
+    values = [csaa.iloc[0]['csaa'], csaa.iloc[0]['pure_csaa']]
+    colors = [csaa_info['color'], pure_csaa_info['color']]
+    
+    # Create vertical bar chart (percentiles on y-axis)
+    ax.bar(categories, percentiles, color=colors, width=.75)
+    ax.set_ylim(0, 100)  # Percentiles range from 0 to 100
+    ax.set_ylabel('Percentile')
 
-    # Create horizontal bar chart with dynamic colors
-    bars = ax.barh(categories, values, color=colors, height=0.5)  # Set height to create space between bars
+    # Add values on the bars
+    for i, (value, percentile) in enumerate(zip(values, percentiles)):
+        offset = 0 if percentile <= 10 else -10  # Adjust text positioning
+        ax.text(i, percentile + offset, f'{value:.2f}', va='bottom', fontsize=10, ha='center')
     
-    # Set axis limits to reflect the full range for negative and positive values
-    ax.set_xlim(-12, 14)  # Dynamically adjust the x-axis range
-    
-    # Add vertical grid lines
-    ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+    # Remove unnecessary spines and format the plot
+    ax.set_title('CSAA & Pure CSAA', fontweight='bold')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
 
-    # Add "Value" label to x-axis
-    ax.set_xlabel('Value', fontsize=12)
-    ax.set_yticklabels(categories, fontweight='bold')
-    
-    # Add the percentile inside the bars
-    for index, bar in enumerate(bars):
-        # Place percentile text inside the bar, centered in the bar
-        ax.text(0, bar.get_y() + bar.get_height() / 2, 
-                f'{add_suffix(percentiles[index])} percentile', ha='center', va='center', color='black', fontsize=9)
+    return ax
 
     #ax.set_title("CSAA & Pure CSAA", fontweight='bold')
 
@@ -413,7 +419,7 @@ def collect_player_ids(catchers):
     return ids
 
 
-def get_all_catcher_throwing(ids, filename='catcher_throwing_data.csv'):
+def get_all_catcher_throwing(ids, filename='data/catcher_throwing_data.csv'):
     # Check if the file already exists
     if os.path.exists(filename):
         # If the file exists, just read and return its contents
@@ -448,14 +454,23 @@ def get_csaa(catcher_throwing):
     csaa = 0
     teamwork = 0
     pitching = 0
+    total_cs = 0
+    total_sb = 0
 
     for _, row in catcher_throwing.iterrows():
         data = row.get('data', [])  
         csaa += data.get('cs_aa', 0)
         teamwork += data.get('teamwork_over_xcs', 0)
-        if type(data.get('pitcher_cs_aa')) == float:
-            pitching += data.get('pitcher_cs_aa', 0)
-        
+        if data.get('is_runner_cs') == 1:
+            total_cs +=1
+        if data.get('is_runner_sb') == 1:
+            total_sb +=1
+        if isinstance(data.get('pitcher_cs_aa'), float):  
+            pitching += data['pitcher_cs_aa']
+    rSB = ((csaa * .65))
+    print(f"steals: {total_sb}")
+    print(f"caught stealing; {total_cs}")
+    print(rSB)
     return [csaa, csaa - teamwork, csaa - pitching - teamwork]
 
 #refactor to work with a loop to get_csaa
@@ -522,6 +537,41 @@ def create_csaa_scatter_plot(all_csaa):
                 fontsize=8, ha='center', color='black')
 
     return plt
+
+def find_best_caught_stealing(df, player_name):
+   
+    if 'data' in df.columns:
+        df = pd.json_normalize(df['data'])
+
+    # Find plays where runner is thrown out when expected to be safe
+    filtered_df = df[(df['is_runner_cs'] == 1) & (df['exp_cs'] <= 0.5)]
+
+    filtered_df['play_url'] = filtered_df['play_id'].apply(
+        lambda play_id: f"https://baseballsavant.mlb.com/sporty-videos?playId={play_id}"
+    )
+
+    filtered_df = filtered_df.sort_values(by='exp_cs', ascending=True)
+
+    # Save the filtered DataFrame to a CSV file
+    filtered_df['play_url'].to_csv(f"video_links/best_cs/{player_name}.csv", index=False)
+
+def find_worst_caught_stealing(df, player_name):
+    
+    if 'data' in df.columns:
+        df = pd.json_normalize(df['data'])
+
+    # Find plays where runner was safe when expected to be thrown out
+    filtered_df = df[(df['is_runner_cs'] == 0) & (df['exp_cs'] >= 0.5)]
+
+    filtered_df['play_url'] = filtered_df['play_id'].apply(
+        lambda play_id: f"https://baseballsavant.mlb.com/sporty-videos?playId={play_id}"
+    )
+
+    filtered_df = filtered_df.sort_values(by='exp_cs', ascending=False)
+
+    # Save the filtered DataFrame to a CSV file
+    filtered_df['play_url'].to_csv(f"video_links/worst_cs/{player_name}.csv", index=False)
+
 
 
 def main():
@@ -622,11 +672,18 @@ def main():
     fig.text(.51, .52, f"{measurables}", ha='center', va='center', fontsize=10) 
     fig.text(.51, .48, "@kickdirtbb on X.com", ha='center', va='center', fontsize=9) 
 
+
+    #video plays by id: https://baseballsavant.mlb.com/sporty-videos?playId={}
+    find_best_caught_stealing(catcher_throwing, player_name)
+    find_worst_caught_stealing(catcher_throwing, player_name)
+   
     # Adjust layout
     plt.tight_layout() 
 
     # Show the main graphic
-    plt.show()
+    #plt.show()
+    full_path = f"cards/{player_name}_2024"
+    plt.savefig(full_path)
 
     # Get the scatterplot
     #csaa_plot = create_csaa_scatter_plot(all_csaa)
