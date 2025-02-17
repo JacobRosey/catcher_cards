@@ -677,13 +677,14 @@ def main():
     find_best_caught_stealing(catcher_throwing, player_name)
     find_worst_caught_stealing(catcher_throwing, player_name)
    
+    full_path = f"cards/{player_name}_2024"
+    plt.savefig(full_path)
+    
     # Adjust layout
     plt.tight_layout() 
 
     # Show the main graphic
-    #plt.show()
-    full_path = f"cards/{player_name}_2024"
-    plt.savefig(full_path)
+    plt.show()
 
     # Get the scatterplot
     #csaa_plot = create_csaa_scatter_plot(all_csaa)
