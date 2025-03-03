@@ -45,8 +45,8 @@ def get_percentile_mapping(column):
 
     filtered_cols = ['id', 'year', 'catcher', 'last_name', 'first_name', 'player_id', 'team_id', 'age']
     if column.name in filtered_cols:
-        return None # we don't give no fucks about your age percentile
-    percentiles = np.arange(0, 101, 1)  # 0th to 100th percentiles, steps of 5
+        return None 
+    percentiles = np.arange(0, 101, 1) 
     values = np.percentile(column.dropna(), percentiles)
     
     return dict(zip(percentiles, values))
@@ -60,7 +60,7 @@ def find_percentile(value, mapping):
 
 def add_suffix(percentile):
     percentileAsStr = str(percentile)
-    last_digit = int(percentileAsStr[-1])  # Convert last digit to int
+    last_digit = int(percentileAsStr[-1]) 
 
     if 11 <= percentile <= 13:  # Handle special cases (11th, 12th, 13th)
         suffix = "th"
@@ -92,7 +92,7 @@ def get_percentile_info(data, key, mapping):
 
 # Used to calculate percentiles where lower numbers are better
 def invert_percentile(item):
-    item['value'] = 100 - item['value']  # Keep it an integer
+    item['value'] = 100 - item['value']
     
     # Color mapping using a dictionary
     color_mapping = {
@@ -129,7 +129,6 @@ def get_catcher_blocking(player_id, year):
     
     url = f'https://baseballsavant.mlb.com/leaderboard/services/catcher-blocking/{player_id}?game_type=Regular&n=q&season_end={year}&season_start={year}&split=no&team=&type=Cat&with_team_only=1'
  
-    # Send a GET request to the leaderboard page
     response = requests.get(url)
     
     if response.status_code == 200:
@@ -143,7 +142,6 @@ def get_catcher_blocking(player_id, year):
 def get_catcher_throwing(player_id, year):
     url = f'https://baseballsavant.mlb.com/leaderboard/services/catcher-throwing/{player_id}?game_type=Regular&n=q&season_end={year}&season_start={year}&split=no&team=&type=Cat&with_team_only=1'
 
-    # Send a GET request to the URL
     response = requests.get(url)
 
     # Check if the response is successful
